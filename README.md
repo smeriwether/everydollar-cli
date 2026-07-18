@@ -2,24 +2,56 @@
 
 Read-only command line access to your [EveryDollar](https://www.everydollar.com) budget, authenticated with the session you already have open in Chrome.
 
+## Requirements
+
+- **macOS.** The tool reads Chrome's cookie store, whose format and Keychain-backed encryption are macOS specific.
+- **Google Chrome, logged in to EveryDollar.** The session it reads is the one your browser already holds, so sign in there first.
+- **Xcode Command Line Tools**, only for installing through Homebrew — see [Troubleshooting](#troubleshooting).
+
 ## Install
 
 ```sh
-uv sync
+brew tap smeriwether/everydollar
+brew install everydollar
 ```
+
+Homebrew 6 asks you to trust a third-party tap before it will load the formula. If it does:
+
+```sh
+brew trust smeriwether/everydollar
+```
+
+### From source
+
+```sh
+git clone https://github.com/smeriwether/everydollar-cli
+cd everydollar-cli
+uv sync
+uv run everydollar status
+```
+
+Every command below then needs a `uv run` prefix.
+
+### First run
+
+```sh
+everydollar status
+```
+
+macOS will ask for permission to read Chrome's encryption key from your Keychain. Choose **Always Allow** so later runs are silent. A successful run reports how many budget months it can see.
 
 ## Usage
 
 ```sh
-uv run everydollar status                      # check the Chrome session works
-uv run everydollar budget                      # this month's budget
-uv run everydollar budget --month 2026-03      # a specific month
-uv run everydollar transactions --limit 20
-uv run everydollar transactions --category groceries
-uv run everydollar transactions --search "whole foods"
-uv run everydollar transactions --start 2026-01-01 --end 2026-06-30 --csv > first-half.csv
-uv run everydollar accounts
-uv run everydollar months                      # every month that has a budget
+everydollar status                      # check the Chrome session works
+everydollar budget                      # this month's budget
+everydollar budget --month 2026-03      # a specific month
+everydollar transactions --limit 20
+everydollar transactions --category groceries
+everydollar transactions --search "whole foods"
+everydollar transactions --start 2026-01-01 --end 2026-06-30 --csv > first-half.csv
+everydollar accounts
+everydollar months                      # every month that has a budget
 ```
 
 `budget`, `transactions` and `accounts` all accept `--json`; `transactions` also accepts `--csv`. Both write to stdout so they pipe into `jq`, `duckdb` or a spreadsheet.
@@ -64,6 +96,30 @@ These are the things that make the data easy to get subtly wrong, all handled in
 - **Transactions are soft-deleted.** Rows with a `deletedAt` are excluded by default; pass `--include-deleted` to keep them.
 - **Not every transaction is categorized.** Bank imports arrive with no allocation and show as `Uncategorized`.
 
+## Troubleshooting
+
+**`Your Xcode (…) is too outdated`** — Homebrew builds Python packages from source and refuses to do so when the selected developer tools are older than the current release. If your Command Line Tools are newer than your Xcode, point at them for the install:
+
+```sh
+sudo xcode-select --switch /Library/Developer/CommandLineTools
+brew install everydollar
+sudo xcode-select --switch /Applications/Xcode.app/Contents/Developer
+```
+
+`xcodebuild` will not work while switched away from Xcode, so switch back afterwards. Updating Xcode fixes it permanently.
+
+**`Refusing to load formula … from untrusted tap`** — run `brew trust smeriwether/everydollar`.
+
+**`Could not read Chrome's encryption key from the macOS Keychain`** — a permission prompt was dismissed. Re-run and choose **Always Allow**.
+
+**`No SESSION cookie found`** — Chrome is not signed in to EveryDollar on this machine. Sign in and re-run. If you keep several Chrome profiles, name the one that is signed in:
+
+```sh
+everydollar budget --profile "Profile 1"
+```
+
+**`EveryDollar rejected the session cookie`** — the browser session ended. Log in again at [everydollar.com](https://www.everydollar.com) in Chrome; the next run picks the new cookie up automatically.
+
 ## Tests
 
 ```sh
@@ -72,6 +128,26 @@ uv run pytest
 
 The suite covers URN parsing, cent conversion, split allocations, soft-delete filtering, expired-session handling, and Chrome's cookie decryption scheme (using locally encrypted fixtures rather than the real cookie store).
 
+## Releasing
+
+The [tap](https://github.com/smeriwether/homebrew-everydollar) pins an exact tarball, so a new version means tagging a release and updating the formula:
+
+```sh
+git tag v0.1.2 && git push origin v0.1.2
+gh release create v0.1.2 --title v0.1.2 --notes "..."
+
+# url and sha256 for the formula
+curl -sL https://github.com/smeriwether/everydollar-cli/archive/refs/tags/v0.1.2.tar.gz | shasum -a 256
+```
+
+If the dependencies changed, regenerate the formula's `resource` blocks with `scripts/generate_resources.py` and paste them in. Homebrew's own `brew update-python-resources` passes a `--uploaded-prior-to` flag that pip 25.x does not accept, so it fails on current setups — hence the script.
+
+Homebrew installs Python dependencies with `--no-binary=:all:`, so every dependency must publish an sdist and must not need a compiler. That is why this tool decrypts cookies with the system `openssl` rather than the `cryptography` package, which would drag in a Rust toolchain at build time.
+
 ## Scope
 
 Read-only by design. The client issues `GET` requests only and sends no CSRF token, so it cannot modify your budget.
+
+## License
+
+[MIT](LICENSE)
