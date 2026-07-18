@@ -1,0 +1,27 @@
+[project]
+name = "everydollar-cli"
+version = "0.1.0"
+description = "Read-only CLI for EveryDollar budget data, authenticated with your Chrome session"
+readme = "README.md"
+authors = [
+    { name = "Stephen Meriwether", email = "stephen@merimerimeri.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "httpx>=0.28.1",
+    "rich>=15.0.0",
+    "typer>=0.27.0",
+]
+
+[project.scripts]
+everydollar = "everydollar_cli.cli:app"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "respx>=0.23.1",
+]
