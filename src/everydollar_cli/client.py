@@ -89,6 +89,13 @@ class EveryDollarClient:
     def budget(self, budget_id: str) -> Budget:
         return Budget.from_api(self._get(f"/budgets/{budget_id}") or {})
 
+    def budget_payload(self, budget_id: str) -> dict:
+        """Return the unmodified budget payload for archival exports."""
+        payload = self._get(f"/budgets/{budget_id}") or {}
+        if not isinstance(payload, dict):
+            raise ApiError(f"GET /budgets/{budget_id} returned an unexpected payload.")
+        return payload
+
     def transactions(
         self, start: date, end: date, include_deleted: bool = False
     ) -> list[Transaction]:
@@ -103,6 +110,18 @@ class EveryDollarClient:
         if include_deleted:
             return parsed
         return [t for t in parsed if not t.deleted]
+
+    def transaction_payloads(self, start: date, end: date) -> list[dict]:
+        """Return unmodified transaction payloads, including soft-deleted rows."""
+        payload = self._get(
+            "/transactions/search/findByDateRange",
+            startDate=start.isoformat(),
+            endDate=end.isoformat(),
+        )
+        raw = (payload or {}).get("transactions", [])
+        if not isinstance(raw, list) or not all(isinstance(row, dict) for row in raw):
+            raise ApiError("EveryDollar returned an unexpected transactions payload.")
+        return raw
 
     def accounts(self) -> list[Account]:
         """Fetch every linked account."""

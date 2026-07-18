@@ -65,7 +65,7 @@ def _keychain_password() -> bytes:
     This may surface a system prompt the first time; granting "Always Allow"
     makes subsequent runs silent.
     """
-    last_error = ""
+    failures = []
     for account in _KEYCHAIN_ACCOUNTS:
         result = subprocess.run(
             ["security", "find-generic-password", "-w", "-s", _KEYCHAIN_SERVICE, "-a", account],
@@ -74,12 +74,15 @@ def _keychain_password() -> bytes:
         )
         if result.returncode == 0 and result.stdout.strip():
             return result.stdout.strip().encode("utf-8")
-        last_error = result.stderr.strip()
+        # Report every account. Only one of these ever exists on a given machine,
+        # so the "not found" from the others would otherwise bury the real error.
+        detail = result.stderr.strip() or f"exit status {result.returncode}"
+        failures.append(f"account {account!r}: {detail}")
 
     raise CookieError(
-        "Could not read Chrome's encryption key from the macOS Keychain.\n"
-        f"  keychain said: {last_error or 'no matching entry'}\n"
-        "  If a prompt appeared, choose 'Always Allow' and re-run."
+        "Could not read Chrome's encryption key from the macOS Keychain.\n  "
+        + "\n  ".join(failures)
+        + "\n  If a prompt appeared, choose 'Always Allow' and re-run."
     )
 
 

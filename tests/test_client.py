@@ -45,6 +45,14 @@ def test_budget_for_month_anchors_to_first_of_month(client):
 
 
 @respx.mock
+def test_budget_payload_preserves_raw_fields(client):
+    payload = {"id": "b1", "date": "2026-07-01", "groups": [], "futureField": {"kept": True}}
+    respx.get(f"{BASE_URL}/budgets/b1").mock(return_value=httpx.Response(200, json=payload))
+
+    assert client.budget_payload("b1") == payload
+
+
+@respx.mock
 def test_transactions_exclude_soft_deleted_by_default(client):
     respx.get(f"{BASE_URL}/transactions/search/findByDateRange").mock(
         return_value=httpx.Response(
@@ -80,6 +88,23 @@ def test_transactions_can_include_soft_deleted(client):
     rows = client.transactions(date(2026, 7, 1), date(2026, 7, 31), include_deleted=True)
 
     assert len(rows) == 2
+
+
+@respx.mock
+def test_transaction_payloads_preserve_raw_fields_and_deleted_rows(client):
+    payload = {
+        "transactions": [
+            {"id": "1", "amount": -100, "futureField": "kept"},
+            {"id": "2", "amount": -200, "deletedAt": "2026-07-11"},
+        ]
+    }
+    respx.get(f"{BASE_URL}/transactions/search/findByDateRange").mock(
+        return_value=httpx.Response(200, json=payload)
+    )
+
+    rows = client.transaction_payloads(date(2026, 7, 1), date(2026, 7, 31))
+
+    assert rows == payload["transactions"]
 
 
 @respx.mock

@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import calendar
 import csv
+import hashlib
 import json
 import sys
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Optional
 
@@ -57,6 +58,10 @@ def _parse_month(value: str | None) -> date:
 
 def _month_end(month: date) -> date:
     return month.replace(day=calendar.monthrange(month.year, month.month)[1])
+
+
+def _month_label(month: date) -> str:
+    return month.strftime("%Y-%m")
 
 
 def _money(cents: int) -> str:
@@ -229,6 +234,127 @@ def _transaction_payload(t: Transaction) -> dict:
     }
 
 
+def _build_snapshot(
+    client: EveryDollarClient,
+    target: date,
+    *,
+    window_days: int = 45,
+    captured_at: datetime | None = None,
+) -> dict:
+    """Build an archival snapshot using allocation identity, not transaction date."""
+    index = client.budget_index()
+    budget_id = index.get(target.year, {}).get(target.month)
+    if not budget_id:
+        raise ApiError(f"EveryDollar has no budget for {_month_label(target)}.")
+
+    budget = client.budget_payload(budget_id)
+    item_ids = {
+        item.get("id")
+        for group in budget.get("groups", [])
+        for item in group.get("budgetItems", [])
+        if item.get("id")
+    }
+    start = target - timedelta(days=window_days)
+    end = _month_end(target) + timedelta(days=window_days)
+    candidates = client.transaction_payloads(start, end)
+
+    transactions = []
+    matching_allocation_count = 0
+    for transaction in candidates:
+        matching_allocations = [
+            allocation
+            for allocation in transaction.get("allocations") or []
+            if allocation.get("budgetItemId") in item_ids
+        ]
+        if not matching_allocations:
+            continue
+        matching_allocation_count += len(matching_allocations)
+        transactions.append(transaction)
+
+    transactions.sort(key=lambda row: ((row.get("date") or ""), (row.get("id") or "")))
+    month_start = target.isoformat()
+    month_end = _month_end(target).isoformat()
+    unassigned = [
+        transaction
+        for transaction in candidates
+        if month_start <= (transaction.get("date") or "")[:10] <= month_end
+        and not (transaction.get("allocations") or [])
+    ]
+    unassigned.sort(key=lambda row: ((row.get("date") or ""), (row.get("id") or "")))
+    content = {
+        "budget": budget,
+        "transactions": transactions,
+        "unassignedTransactions": unassigned,
+    }
+    content_hash = hashlib.sha256(
+        json.dumps(content, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    captured = captured_at or datetime.now(timezone.utc)
+
+    return {
+        "schemaVersion": 1,
+        "source": "everydollar",
+        "capturedAt": captured.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "budgetMonth": _month_label(target),
+        "budgetId": budget_id,
+        "contentHash": content_hash,
+        "transactionQuery": {
+            "startDate": start.isoformat(),
+            "endDate": end.isoformat(),
+            "windowDays": window_days,
+            "association": "allocation budgetItemId belongs to the selected budget",
+        },
+        "counts": {
+            "transactions": len(transactions),
+            "allocations": matching_allocation_count,
+            "softDeletedTransactions": sum(1 for row in transactions if row.get("deletedAt")),
+            "outOfMonthTransactions": sum(
+                1
+                for row in transactions
+                if not month_start <= (row.get("date") or "")[:10] <= month_end
+            ),
+            "unassignedTransactions": len(unassigned),
+            "uncategorizedTransactions": sum(1 for row in unassigned if not row.get("deletedAt")),
+        },
+        "budget": budget,
+        "transactions": transactions,
+        "unassignedTransactions": unassigned,
+    }
+
+
+@app.command()
+def snapshot(
+    month: str = typer.Option(..., "--month", "-m", help="Budget month as YYYY-MM."),
+    as_json: bool = typer.Option(False, "--json", help="Emit the complete archival JSON snapshot."),
+    window_days: int = typer.Option(
+        45,
+        "--window-days",
+        min=0,
+        help="Days on either side of the month to inspect for assigned transactions.",
+    ),
+    profile: Optional[str] = CHROME_PROFILE,
+) -> None:
+    """Snapshot one budget month, including split and out-of-month allocations."""
+    target = _parse_month(month)
+    with _client(profile) as client:
+        try:
+            payload = _build_snapshot(client, target, window_days=window_days)
+        except (ApiError, AuthError) as exc:
+            _fail(str(exc))
+
+    if as_json:
+        console.print_json(json.dumps(payload))
+        return
+
+    counts = payload["counts"]
+    console.print()
+    console.print(f"  [bold]{payload['budgetMonth']}[/bold]  {counts['transactions']} transactions, "
+                  f"{counts['allocations']} allocations, "
+                  f"{counts['uncategorizedTransactions']} uncategorized")
+    console.print(f"  content {payload['contentHash']}")
+    console.print()
+
+
 def _write_csv(rows: list[Transaction]) -> None:
     writer = csv.writer(sys.stdout)
     writer.writerow(["date", "merchant", "amount", "categories", "split", "note"])
@@ -336,13 +462,21 @@ def accounts(
 
 
 @app.command()
-def months(profile: Optional[str] = CHROME_PROFILE) -> None:
+def months(
+    as_json: bool = typer.Option(False, "--json", help="Emit machine-readable JSON."),
+    profile: Optional[str] = CHROME_PROFILE,
+) -> None:
     """List every month that has a budget."""
     with _client(profile) as client:
         try:
             index = client.budget_index()
         except (ApiError, AuthError) as exc:
             _fail(str(exc))
+
+    available = [f"{year:04d}-{month:02d}" for year in sorted(index) for month in sorted(index[year])]
+    if as_json:
+        console.print_json(json.dumps({"months": available, "count": len(available)}))
+        return
 
     console.print()
     for year in sorted(index):

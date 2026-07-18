@@ -52,9 +52,28 @@ everydollar transactions --search "whole foods"
 everydollar transactions --start 2026-01-01 --end 2026-06-30 --csv > first-half.csv
 everydollar accounts
 everydollar months                      # every month that has a budget
+everydollar months --json               # machine-readable month list
+everydollar snapshot --month 2026-06 --json
 ```
 
 `budget`, `transactions` and `accounts` all accept `--json`; `transactions` also accepts `--csv`. Both write to stdout so they pipe into `jq`, `duckdb` or a spreadsheet.
+
+### Archival snapshots
+
+`snapshot` is the machine-readable export intended for archival tools such as
+Life. It preserves the original budget and transaction payloads, full ids,
+integer-cent amounts, split allocations, account references and soft-deletion
+state. Transactions are associated with a budget by their allocation's full
+`budgetItemId`, not merely by their transaction date. This matches EveryDollar's
+own monthly export semantics, including transactions assigned just outside the
+calendar month. Active transactions in the calendar month with no allocation
+are retained separately as `unassignedTransactions`, allowing an archive to
+refuse finalization until categorization is complete.
+
+The command inspects 45 days on either side of the month by default. Use
+`--window-days` to widen that range. Its `contentHash` excludes `capturedAt`, so
+an archive can retry safely and write a new immutable version only when the
+source content changes.
 
 ## Authentication
 
@@ -70,7 +89,7 @@ When the session does end, every command fails with a message telling you to log
 Use `--profile` if you run more than one Chrome profile:
 
 ```sh
-uv run everydollar budget --profile "Profile 1"
+everydollar budget --profile "Profile 1"
 ```
 
 ## The API
