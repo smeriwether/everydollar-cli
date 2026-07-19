@@ -132,3 +132,53 @@ def test_server_error_raises_api_error(client):
 
     with pytest.raises(ApiError):
         client.accounts()
+
+
+# --- session renewal ---------------------------------------------------------
+
+
+@respx.mock
+def test_retries_once_with_a_renewed_session():
+    """A rejected session is replaced mid-request rather than failing the run."""
+    respx.get(f"{BASE_URL}/accounts").mock(
+        side_effect=[httpx.Response(401), httpx.Response(200, json=[])]
+    )
+
+    with EveryDollarClient("dead", on_auth_failure=lambda: "renewed") as client:
+        assert client.accounts() == []
+
+    assert "SESSION=renewed" in respx.calls[1].request.headers["cookie"]
+
+
+@respx.mock
+def test_treats_a_redirect_as_a_rejected_session():
+    """An expired session redirects to the login page instead of returning 401."""
+    respx.get(f"{BASE_URL}/accounts").mock(
+        side_effect=[
+            httpx.Response(302, headers={"location": "https://www.everydollar.com/app/login"}),
+            httpx.Response(200, json=[]),
+        ]
+    )
+
+    with EveryDollarClient("dead", on_auth_failure=lambda: "renewed") as client:
+        assert client.accounts() == []
+
+
+@respx.mock
+def test_gives_up_after_one_retry():
+    """If a freshly minted session is also rejected, retrying would just loop."""
+    route = respx.get(f"{BASE_URL}/accounts").mock(return_value=httpx.Response(401))
+
+    with EveryDollarClient("dead", on_auth_failure=lambda: "also-dead") as client:
+        with pytest.raises(AuthError):
+            client.accounts()
+
+    assert route.call_count == 2
+
+
+@respx.mock
+def test_without_a_refresh_callback_it_fails_as_before(client):
+    respx.get(f"{BASE_URL}/accounts").mock(return_value=httpx.Response(401))
+
+    with pytest.raises(AuthError):
+        client.accounts()

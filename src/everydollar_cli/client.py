@@ -1,12 +1,16 @@
 """Read-only HTTP client for the EveryDollar web app's internal API.
 
-Authentication is the browser's own SESSION cookie and nothing else. Reads do
-not require the X-CSRF-TOKEN header that the web app sends -- that guards writes,
-which this client never performs.
+Authentication is a SESSION cookie. Reads do not require the X-CSRF-TOKEN header
+that the web app sends -- that guards writes, which this client never performs.
+
+Because that cookie dies with the browser, the client accepts an on_auth_failure
+callback and retries a rejected request once with a freshly minted session. See
+session.py for how a new one is obtained without a login prompt.
 """
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import date
 
 import httpx
@@ -29,7 +33,15 @@ class AuthError(ApiError):
 class EveryDollarClient:
     """Read-only access to budgets, transactions and accounts."""
 
-    def __init__(self, session_cookie: str, timeout: float = 30.0) -> None:
+    def __init__(
+        self,
+        session_cookie: str,
+        timeout: float = 30.0,
+        on_auth_failure: Callable[[], str] | None = None,
+    ) -> None:
+        # Supplied by SessionProvider.refresh, so a session that expired between
+        # scheduled runs renews itself instead of failing the collection.
+        self._on_auth_failure = on_auth_failure
         self._client = httpx.Client(
             base_url=BASE_URL,
             timeout=timeout,
@@ -51,13 +63,16 @@ class EveryDollarClient:
         self._client.close()
 
     def _get(self, path: str, **params: object) -> object:
-        try:
-            response = self._client.get(path, params=params or None)
-        except httpx.HTTPError as exc:
-            raise ApiError(f"Could not reach EveryDollar: {exc}") from exc
+        response = self._request(path, params)
 
         # An expired session redirects to the login page rather than returning 401.
-        if response.status_code in (401, 403) or response.is_redirect:
+        if self._rejected(response) and self._on_auth_failure is not None:
+            # One retry only. If a session minted seconds ago is also rejected,
+            # the problem is not staleness and retrying would just loop.
+            self._client.cookies.set("SESSION", self._on_auth_failure(), domain=".everydollar.com")
+            response = self._request(path, params)
+
+        if self._rejected(response):
             raise AuthError(
                 "EveryDollar rejected the session cookie.\n"
                 "  Your Chrome session has expired. Log in again at\n"
@@ -70,6 +85,16 @@ class EveryDollarClient:
             return response.json()
         except ValueError as exc:
             raise ApiError(f"GET {path} returned a non-JSON response.") from exc
+
+    def _request(self, path: str, params: dict) -> httpx.Response:
+        try:
+            return self._client.get(path, params=params or None)
+        except httpx.HTTPError as exc:
+            raise ApiError(f"Could not reach EveryDollar: {exc}") from exc
+
+    @staticmethod
+    def _rejected(response: httpx.Response) -> bool:
+        return response.status_code in (401, 403) or response.is_redirect
 
     def budget_index(self) -> dict[int, dict[int, str]]:
         """Map each year and month to its budget id."""

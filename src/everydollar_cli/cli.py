@@ -16,8 +16,9 @@ from rich.console import Console
 from rich.table import Table
 
 from .client import ApiError, AuthError, EveryDollarClient
-from .cookies import CookieError, read_session_cookie
+from .cookies import CookieError, read_sso_cookies
 from .models import Budget, Transaction, spending_by_item, to_dollars
+from .session import SessionError, SessionProvider
 
 app = typer.Typer(
     help="Read-only access to your EveryDollar budget, using your Chrome session.",
@@ -37,9 +38,12 @@ def _fail(message: str) -> None:
 
 
 def _client(profile: str | None) -> EveryDollarClient:
+    provider = SessionProvider(profile)
     try:
-        return EveryDollarClient(read_session_cookie(profile))
-    except CookieError as exc:
+        # refresh() is handed to the client so a session rejected mid-run is
+        # replaced rather than failing the command.
+        return EveryDollarClient(provider.get(), on_auth_failure=provider.refresh)
+    except (CookieError, SessionError) as exc:
         _fail(str(exc))
     raise AssertionError("unreachable")
 
@@ -487,23 +491,47 @@ def months(
 
 @app.command()
 def status(profile: Optional[str] = CHROME_PROFILE) -> None:
-    """Check that the Chrome session cookie works."""
+    """Check that authentication works, and report when it will stop working."""
+    provider = SessionProvider(profile)
     try:
-        cookie = read_session_cookie(profile)
-    except CookieError as exc:
+        session = provider.get()
+    except (CookieError, SessionError) as exc:
         _fail(str(exc))
 
-    console.print(f"  Cookie found in Chrome ({len(cookie)} chars)")
-    with EveryDollarClient(cookie) as client:
+    origin = {
+        "cache": "reused from the local cache",
+        "chrome": "read from Chrome's live session",
+        "sso": "minted via Auth0 single sign-on",
+    }.get(provider.source, provider.source or "unknown")
+    console.print(f"  Session {origin} ({len(session)} chars)")
+
+    with EveryDollarClient(session, on_auth_failure=provider.refresh) as client:
         try:
             index = client.budget_index()
-        except AuthError as exc:
-            _fail(str(exc))
-        except ApiError as exc:
+        except (ApiError, AuthError) as exc:
             _fail(str(exc))
 
     total = sum(len(v) for v in index.values())
     console.print(f"  [green]Session is valid[/green] — {total} budget months available")
+
+    # The SESSION cookie says nothing about how long this keeps working; the SSO
+    # session behind it is what eventually forces a browser login.
+    try:
+        sso = read_sso_cookies(profile)
+    except CookieError:
+        console.print("  [yellow]No Auth0 SSO cookies found[/yellow] — sessions cannot renew unattended")
+        return
+
+    if sso.expires is None:
+        console.print("  Auth0 SSO session found (no expiry recorded)")
+        return
+
+    days = (sso.expires - datetime.now(timezone.utc)).days
+    colour = "green" if days > 14 else "yellow"
+    console.print(
+        f"  Auth0 SSO valid for [{colour}]{days} more day(s)[/{colour}] "
+        f"(until {sso.expires:%Y-%m-%d}); log in via Chrome before then"
+    )
 
 
 if __name__ == "__main__":

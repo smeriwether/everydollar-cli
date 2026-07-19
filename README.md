@@ -77,14 +77,28 @@ source content changes.
 
 ## Authentication
 
-EveryDollar's web app authenticates with a single `SESSION` cookie. This tool reads that cookie straight out of Chrome's local cookie store on each run, so there is no token to paste and nothing to keep in sync.
+EveryDollar's web app authenticates with a `SESSION` cookie, which this tool reads out of Chrome's local cookie store. That cookie is `HttpOnly`, so reading it means decrypting Chrome's cookie database with the encryption key from your macOS Keychain. The first run may raise a Keychain prompt — choose **Always Allow** to make later runs silent.
 
-Two things follow from how that cookie works:
+The `SESSION` cookie carries no expiry: it lives as long as your Chrome session and is dropped when Chrome fully quits. On its own that made unattended use impossible, because every browser restart broke the tool.
 
-- It is `HttpOnly`, so page JavaScript cannot see it. Reading it means decrypting Chrome's cookie database, which needs the encryption key from your macOS Keychain. The first run may raise a Keychain prompt — choose **Always Allow** to make later runs silent.
-- It carries **no expiry**. It is a true browser-session cookie that lives as long as your Chrome session and is dropped when Chrome fully quits. There is no refresh token to rotate, which is exactly why this tool re-reads Chrome every time: whenever Chrome renews your session, the CLI picks it up with no action from you.
+It works anyway, for the same reason the website never asks you to log in twice. EveryDollar is a Spring Security OAuth2 client and Auth0 (`id.ramseysolutions.com`) is the identity provider. Requesting a protected page without a `SESSION` redirects to Auth0, which recognises its own **persistent** SSO cookie, redirects straight back with an authorization code, and EveryDollar exchanges it for a fresh `SESSION`. No password, no prompt.
 
-When the session does end, every command fails with a message telling you to log in again at everydollar.com in Chrome. Nothing else is needed.
+This tool replays that handshake. A session is resolved from, in order:
+
+1. a local cache at `~/.cache/everydollar-cli/session.json` (mode `0600`),
+2. Chrome's live `SESSION` cookie, if the browser is running,
+3. the silent Auth0 handshake, using the persistent SSO cookies.
+
+A request rejected mid-run triggers one renewal and one retry, so a session that lapsed between scheduled runs does not fail the run.
+
+**This is not permanent.** Collection survives closing Chrome and keeps working for as long as the Auth0 SSO session lives — months, not hours — but when that lapses only a browser login can renew it. The refresh token that would extend it further is held server-side by EveryDollar and is not reachable from a client. `everydollar status` reports the remaining days so the expiry is never a surprise:
+
+```sh
+everydollar status
+#   Session reused from the local cache (48 chars)
+#   Session is valid — 87 budget months available
+#   Auth0 SSO valid for 89 more day(s) (until 2026-10-17); log in via Chrome before then
+```
 
 Use `--profile` if you run more than one Chrome profile:
 
@@ -137,7 +151,11 @@ sudo xcode-select --switch /Applications/Xcode.app/Contents/Developer
 everydollar budget --profile "Profile 1"
 ```
 
-**`EveryDollar rejected the session cookie`** — the browser session ended. Log in again at [everydollar.com](https://www.everydollar.com) in Chrome; the next run picks the new cookie up automatically.
+**`EveryDollar rejected the session cookie`** — renewal was attempted and the replacement was rejected too. Log in again at [everydollar.com](https://www.everydollar.com) in Chrome.
+
+**`The single-sign-on session has expired`** — Auth0 asked for a login form instead of renewing silently, so unattended renewal is no longer possible. Log in at [everydollar.com](https://www.everydollar.com) in Chrome once; runs go back to being silent for months. `everydollar status` shows how long the SSO session has left.
+
+**`No Auth0 SSO cookies found`** — this machine's Chrome has never completed an EveryDollar login, so there is nothing to renew from. Sign in and re-run.
 
 ## Tests
 
